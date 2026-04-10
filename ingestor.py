@@ -197,6 +197,10 @@ def process_video(video_url):
                 try: os.remove(os.path.join('/tmp/', f))
                 except: pass
 
+@app.route('/kaithheathcheck')
+def health_check():
+    return "OK", 200
+
 @app.route('/ingest', methods=['POST'])
 def ingest():
     data = request.get_json()
