@@ -27,8 +27,8 @@ def safe_int(val, default=0):
     try: return int(val)
     except: return default
 
-@app.route('/kaithhealth') # Change from kaithheathcheck to kaithhealth
-def health_check():
+@app.route('/')
+def home():
     return "OK", 200
 
 @app.route('/')
