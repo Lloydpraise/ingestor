@@ -1,6 +1,6 @@
 name: shoe-ingestor
 runtime: python3.11
-start: gunicorn -w 1 -b 0.0.0.0:8080 --no-control-socket ingestor:app
+start: gunicorn --bind 0.0.0.0:8080 --workers 1 --worker-tmp-dir /tmp --timeout 600 --no-control-socket ingestor:app
 env:
   PORT: 8080
-  PYTHONUNBUFFERED: "1" 
+  PYTHONUNBUFFERED: "1"
