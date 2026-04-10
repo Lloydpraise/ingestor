@@ -1,0 +1,8 @@
+opencv-python
+yt-dlp
+openai
+supabase
+transformers
+torch
+torchvision
+Pillow
