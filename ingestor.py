@@ -27,6 +27,14 @@ def safe_int(val, default=0):
     try: return int(val)
     except: return default
 
+@app.route('/kaithheathcheck')
+def health_check():
+    return "OK", 200
+
+@app.route('/')
+def root_health_check():
+    return jsonify({"status": "ok", "message": "ingestor ready"}), 200
+
 # --- CORE LOGIC ---
 def process_video(video_url):
     # Heavy imports are loaded lazily when the endpoint is called.
@@ -199,10 +207,6 @@ def process_video(video_url):
             if f.startswith(f"crop_{run_id}"): 
                 try: os.remove(os.path.join('/tmp/', f))
                 except: pass
-
-@app.route('/kaithheathcheck')
-def health_check():
-    return "OK", 200
 
 @app.route('/ingest', methods=['POST'])
 def ingest():
