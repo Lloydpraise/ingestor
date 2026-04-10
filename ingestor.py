@@ -1,14 +1,20 @@
 import logging
+print("import ok")
 import os, json, base64, requests, subprocess, shutil, uuid, time
+print("import ok")
 from flask import Flask, request, jsonify
+print("import ok")
 print("--- DEBUG: INGESTOR IS STARTING ---")
 
 app = Flask(__name__)
+print("--- DEBUG: FLASK APP CREATED ---")
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s"
 )
+print("--- DEBUG: LOGGING CONFIGURED ---")
 logger = logging.getLogger("ingestor")
+print("--- DEBUG: LOGGER CREATED ---")
 
 # --- UTILS ---
 def get_config():
@@ -31,17 +37,22 @@ def safe_int(val, default=0):
 @app.route('/kaithhealth') # Change from kaithheathcheck to kaithhealth
 def health_check():
     return "OK", 200
+print("--- DEBUG: HEALTH CHECK ROUTE REGISTERED ---")
 
 @app.route('/')
 def root_health_check():
     return jsonify({"status": "ok", "message": "ingestor ready"}), 200
+print("--- DEBUG: ROOT HEALTH CHECK ROUTE REGISTERED ---")
 
 # --- CORE LOGIC ---
 def process_video(video_url):
     # Heavy imports are loaded lazily when the endpoint is called.
     import cv2
+    print("import ok")
     from openai import OpenAI
+    print("import ok")
     from supabase import create_client
+    print("import ok")
 
     logger.info("Starting ingest for URL: %s", video_url)
     conf = get_config()
@@ -223,6 +234,8 @@ def ingest():
     except Exception as e:
         logger.exception("Error processing video URL %s", url)
         return jsonify({"status": "error", "message": str(e)}), 500
+print("--- DEBUG: INGEST ROUTE REGISTERED ---")
 
 if __name__ == "__main__":
+    print("--- DEBUG: STARTING FLASK DEV SERVER ---")
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
