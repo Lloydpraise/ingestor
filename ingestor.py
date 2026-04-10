@@ -1,20 +1,21 @@
 import logging
-print("import ok")
 import os, json, base64, requests, subprocess, shutil, uuid, time
-print("import ok")
 from flask import Flask, request, jsonify
-print("import ok")
-print("--- DEBUG: INGESTOR IS STARTING ---")
+
+# Set up logging early
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
+logger = logging.getLogger("ingestor")
 
 app = Flask(__name__)
-print("--- DEBUG: FLASK APP CREATED ---")
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s"
-)
-print("--- DEBUG: LOGGING CONFIGURED ---")
-logger = logging.getLogger("ingestor")
-print("--- DEBUG: LOGGER CREATED ---")
+
+# --- LEAPCELL HEALTH CHECK ---
+@app.route('/health')
+def health_check():
+    return "OK", 200
+
+@app.route('/')
+def root():
+    return jsonify({"status": "alive"}), 200
 
 # --- UTILS ---
 def get_config():
@@ -24,218 +25,106 @@ def get_config():
         "SUPABASE_KEY": os.environ.get("SUPABASE_KEY"),
         "DINO_ENDPOINT": os.environ.get("DINO_ENDPOINT")
     }
-    missing = [k for k, v in conf.items() if not v]
-    if missing:
-        logger.error("Missing required env vars: %s", missing)
-        raise Exception(f"Missing Env Vars: {missing}")
     return conf
-
-def safe_int(val, default=0):
-    try: return int(val)
-    except: return default
-
-@app.route('/health') # Changed to standard health check endpoint
-def health_check():
-    return "OK", 200
-print("--- DEBUG: HEALTH CHECK ROUTE REGISTERED ---")
-
-@app.route('/')
-def root_health_check():
-    return jsonify({"status": "ok", "message": "ingestor ready"}), 200
-print("--- DEBUG: ROOT HEALTH CHECK ROUTE REGISTERED ---")
 
 # --- CORE LOGIC ---
 def process_video(video_url):
-    # Heavy imports are loaded lazily when the endpoint is called.
+    # HEAVY IMPORTS ONLY WHEN CALLED
     import cv2
-    print("import ok")
     from openai import OpenAI
-    print("import ok")
     from supabase import create_client
-    print("import ok")
 
-    logger.info("Starting ingest for URL: %s", video_url)
+    logger.info("Starting ingest: %s", video_url)
     conf = get_config()
     client = OpenAI(api_key=conf["OPENAI_API_KEY"])
     supabase = create_client(conf["SUPABASE_URL"], conf["SUPABASE_KEY"])
     
     run_id = str(uuid.uuid4())[:8]
-    
-    # CRITICAL: Use /tmp/ for all file operations on Leapcell
     video_path = f"/tmp/video_{run_id}.mp4"
     frames_dir = f"/tmp/frames_{run_id}"
     os.makedirs(frames_dir, exist_ok=True)
 
     try:
-        # 1. DOWNLOAD (with retry)
-        logger.info("Downloading video to %s", video_path)
-        try:
-            subprocess.run(["yt-dlp", "--no-playlist", "-o", video_path, video_url], check=True, timeout=180)
-            logger.info("Download completed for %s", video_url)
-        except Exception as e:
-            logger.error("Video download failed for %s: %s", video_url, e)
-            raise Exception(f"Video download failed: {str(e)}")
+        # 1. Download
+        subprocess.run(["yt-dlp", "--no-playlist", "-o", video_path, video_url], check=True, timeout=180)
 
-        # 2. EXTRACTION WITH VALIDATION
+        # 2. Extract
         cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            logger.error("Could not open video file: %s", video_path)
-            raise Exception("Could not open video file.")
-            
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        if fps <= 0:
-            logger.warning("FPS detection failed (%s). Defaulting to 30", fps)
-            fps = 30 
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30
         interval = max(1, int(fps * 0.5))
-        logger.info("Video opened. fps=%s interval=%s", fps, interval)
         
         frame_list = []
         count = 0
-        while len(frame_list) < 10: # Cap extraction to 10 frames
+        while len(frame_list) < 10:
             ret, frame = cap.read()
             if not ret: break
             if count % interval == 0:
-                # Sharpness check (Laplacian)
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                sharpness = cv2.Laplacian(gray, cv2.CV_64F).var()
-                if sharpness > 50:
-                    fname = f"frame_{count}.jpg"
-                    fpath = os.path.join(frames_dir, fname)
+                if cv2.Laplacian(gray, cv2.CV_64F).var() > 50:
+                    fpath = os.path.join(frames_dir, f"f_{count}.jpg")
                     cv2.imwrite(fpath, frame)
-                    frame_list.append({"name": fname, "path": fpath})
-                    logger.debug("Saved sharp frame %s (sharpness=%s)", fname, sharpness)
-                else:
-                    logger.debug("Skipped frame %s due to low sharpness=%s", count, sharpness)
+                    frame_list.append({"name": f"f_{count}.jpg", "path": fpath})
             count += 1
         cap.release()
 
-        logger.info("Extracted %s usable frames", len(frame_list))
-        if not frame_list:
-            logger.error("No usable frames extracted from video %s", video_url)
-            raise Exception("No usable frames extracted from video.")
-
-        # 3. AI VISION WITH STRUCTURED OUTPUT
+        # 3. AI
         payload_imgs = []
         for f in frame_list[:6]:
-            with open(f["path"], "rb") as im_file:
-                b64 = base64.b64encode(im_file.read()).decode('utf-8')
+            with open(f["path"], "rb") as im:
+                b64 = base64.b64encode(im.read()).decode('utf-8')
                 payload_imgs.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
-        logger.info("Prepared %s frames for OpenAI request", len(payload_imgs))
 
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             response_format={"type": "json_object"},
             messages=[{"role": "user", "content": [
-                {"type": "text", "text": "Return JSON: {'caption_prefix': 'str', 'shoes': [{'frame_name': 'str', 'coords': [ymin, xmin, ymax, xmax]}]}. Coords must be 0-1000 scale."},
+                {"type": "text", "text": "Return JSON: {'caption_prefix': 'str', 'shoes': [{'frame_name': 'str', 'coords': [ymin, xmin, ymax, xmax]}]}"},
                 *payload_imgs
             ]}]
         )
-        logger.info("OpenAI response received")
         raw_data = json.loads(response.choices[0].message.content)
         
-        if 'shoes' not in raw_data or not isinstance(raw_data['shoes'], list):
-            logger.error("Invalid AI response format: %s", raw_data)
-            raise Exception("Invalid AI response format.")
-
-        # 4. PROCESSING RESULTS
+        # 4. Crops & Upload
         processed_items = []
-        logger.info("Processing %s detected shoes", len(raw_data['shoes']))
-        for i, shoe in enumerate(raw_data['shoes']):
-            if not all(k in shoe for k in ('frame_name', 'coords')):
-                logger.warning("Skipping shoe entry missing required keys: %s", shoe)
-                continue
-            
-            target = next((f for f in frame_list if f["name"] == shoe['frame_name']), None)
-            if target is None:
-                logger.warning("Frame name not found: %s. Using first available.", shoe['frame_name'])
-                target = frame_list[0]
-
+        for i, shoe in enumerate(raw_data.get('shoes', [])):
+            target = next((f for f in frame_list if f["name"] == shoe['frame_name']), frame_list[0])
             img = cv2.imread(target["path"])
-            if img is None:
-                logger.error("Failed to load image for frame %s", target["name"])
-                continue
-
             h, w, _ = img.shape
-            coords = shoe['coords']
-            if not isinstance(coords, list) or len(coords) != 4:
-                continue
+            c = shoe['coords']
+            y1, x1, y2, x2 = [int(c[0]*h/1000), int(c[1]*w/1000), int(c[2]*h/1000), int(c[3]*w/1000)]
             
-            # Normalize and scale coords
-            y1 = max(0, min(h, int(coords[0] * h / 1000)))
-            x1 = max(0, min(w, int(coords[1] * w / 1000)))
-            y2 = max(0, min(h, int(coords[2] * h / 1000)))
-            x2 = max(0, min(w, int(coords[3] * w / 1000)))
-
-            if y2 <= y1 or x2 <= x1:
-                continue 
-
-            # Save crop to /tmp/
-            crop_path = f"/tmp/crop_{run_id}_{i}.jpg"
+            crop_path = f"/tmp/cp_{run_id}_{i}.jpg"
             cv2.imwrite(crop_path, img[y1:y2, x1:x2])
-            logger.info("Created crop %s", crop_path)
 
-            # STORAGE UPLOAD
-            storage_path = f"ingests/{run_id}/shoe_{i}.jpg"
-            try:
-                with open(crop_path, 'rb') as f_upload:
-                    supabase.storage.from_("shoe-crops").upload(storage_path, f_upload, {"content-type": "image/jpeg"})
-                logger.info("Uploaded crop to Supabase path=%s", storage_path)
-            except Exception as e:
-                logger.error("Supabase upload failed: %s", e)
-                continue
+            s_path = f"ingests/{run_id}/shoe_{i}.jpg"
+            with open(crop_path, 'rb') as f_up:
+                supabase.storage.from_("shoe-crops").upload(s_path, f_up, {"content-type": "image/jpeg"})
             
-            # SUPABASE URL RESOLUTION
-            res = supabase.storage.from_("shoe-crops").get_public_url(storage_path)
-            pub_url = res.public_url if hasattr(res, 'public_url') else (res.get('publicUrl') if isinstance(res, dict) else res)
-
-            if not pub_url:
-                logger.error("Could not resolve public URL from response: %s", res)
-                continue
-
-            # DINO PING
+            pub_url = supabase.storage.from_("shoe-crops").get_public_url(s_path)
+            
             dino_payload = {
                 "video_id": f"vid_{run_id}",
-                "product_id": f"prod_{run_id}_{i}",
-                "image_url": pub_url,
+                "image_url": str(pub_url),
                 "caption_prefix": raw_data.get('caption_prefix', 'New Arrival')
             }
-            logger.info("Sending DINO request for product_id=%s", dino_payload['product_id'])
-            try:
-                r = requests.post(f"{conf['DINO_ENDPOINT']}/index-video-frame", json=dino_payload, timeout=45)
-                r.raise_for_status()
-                logger.info("DINO indexing succeeded")
-                processed_items.append(dino_payload)
-            except Exception as e:
-                logger.error("Failed to index item %s: %s", i, e)
+            requests.post(f"{conf['DINO_ENDPOINT']}/index-video-frame", json=dino_payload, timeout=30)
+            processed_items.append(dino_payload)
 
         return processed_items
 
     finally:
-        logger.info("Cleaning up /tmp/ files for run_id=%s", run_id)
         if os.path.exists(video_path): os.remove(video_path)
         if os.path.exists(frames_dir): shutil.rmtree(frames_dir)
-        # Cleanup crops specifically for this run
-        for f in os.listdir('/tmp/'):
-            if f.startswith(f"crop_{run_id}"): 
-                try: os.remove(os.path.join('/tmp/', f))
-                except: pass
 
 @app.route('/ingest', methods=['POST'])
 def ingest():
     data = request.get_json()
-    if not data or 'url' not in data:
-        return jsonify({"error": "No URL provided"}), 400
-    
-    url = data['url']
-    logger.info("Received ingest request for URL: %s", url)
     try:
-        results = process_video(url)
-        return jsonify({"status": "success", "count": len(results), "data": results})
+        res = process_video(data['url'])
+        return jsonify({"status": "success", "data": res})
     except Exception as e:
-        logger.exception("Error processing video URL %s", url)
+        logger.exception("Ingest failed")
         return jsonify({"status": "error", "message": str(e)}), 500
-print("--- DEBUG: INGEST ROUTE REGISTERED ---")
 
 if __name__ == "__main__":
-    print("--- DEBUG: STARTING FLASK DEV SERVER ---")
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
+    app.run(host='0.0.0.0', port=8080)

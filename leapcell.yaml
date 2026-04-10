@@ -4,3 +4,4 @@ start: gunicorn --bind 0.0.0.0:8080 --workers 1 --worker-tmp-dir /tmp --timeout 
 env:
   PORT: 8080
   PYTHONUNBUFFERED: "1"
+  
