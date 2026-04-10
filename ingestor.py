@@ -1,6 +1,7 @@
 import logging
 import os, json, base64, requests, subprocess, shutil, uuid, time
 from flask import Flask, request, jsonify
+print("--- DEBUG: INGESTOR IS STARTING ---")
 
 app = Flask(__name__)
 logging.basicConfig(
@@ -27,8 +28,8 @@ def safe_int(val, default=0):
     try: return int(val)
     except: return default
 
-@app.route('/')
-def home():
+@app.route('/kaithhealth') # Change from kaithheathcheck to kaithhealth
+def health_check():
     return "OK", 200
 
 @app.route('/')
