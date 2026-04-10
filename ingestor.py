@@ -109,6 +109,7 @@ def process_video(video_url):
         logger.info("OpenAI response received")
         raw_data = json.loads(response.choices[0].message.content)
         logger.debug("Raw AI response: %s", raw_data)
+        
         # Basic validation of GPT output
         if 'shoes' not in raw_data or not isinstance(raw_data['shoes'], list):
             logger.error("Invalid AI response format: %s", raw_data)

@@ -1,8 +1,8 @@
-opencv-python
+flask
+flask-cors
+opencv-python-headless
 yt-dlp
 openai
 supabase
-transformers
-torch
-torchvision
-Pillow
+requests
+gunicorn
