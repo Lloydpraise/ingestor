@@ -1,8 +1,6 @@
 import logging
-import os, cv2, json, base64, requests, subprocess, shutil, uuid, time
+import os, json, base64, requests, subprocess, shutil, uuid, time
 from flask import Flask, request, jsonify
-from openai import OpenAI
-from supabase import create_client, Client
 
 app = Flask(__name__)
 logging.basicConfig(
@@ -31,10 +29,15 @@ def safe_int(val, default=0):
 
 # --- CORE LOGIC ---
 def process_video(video_url):
+    # Heavy imports are loaded lazily when the endpoint is called.
+    import cv2
+    from openai import OpenAI
+    from supabase import create_client
+
     logger.info("Starting ingest for URL: %s", video_url)
     conf = get_config()
     client = OpenAI(api_key=conf["OPENAI_API_KEY"])
-    supabase: Client = create_client(conf["SUPABASE_URL"], conf["SUPABASE_KEY"])
+    supabase = create_client(conf["SUPABASE_URL"], conf["SUPABASE_KEY"])
     
     run_id = str(uuid.uuid4())[:8]
     
