@@ -37,13 +37,15 @@ def process_video(video_url):
     supabase: Client = create_client(conf["SUPABASE_URL"], conf["SUPABASE_KEY"])
     
     run_id = str(uuid.uuid4())[:8]
-    video_path = f"video_{run_id}.mp4"
-    frames_dir = f"frames_{run_id}"
+    
+    # CRITICAL: Use /tmp/ for all file operations on Leapcell
+    video_path = f"/tmp/video_{run_id}.mp4"
+    frames_dir = f"/tmp/frames_{run_id}"
     os.makedirs(frames_dir, exist_ok=True)
 
     try:
         # 1. DOWNLOAD (with retry)
-        logger.info("Downloading TikTok video to %s", video_path)
+        logger.info("Downloading video to %s", video_path)
         try:
             subprocess.run(["yt-dlp", "--no-playlist", "-o", video_path, video_url], check=True, timeout=180)
             logger.info("Download completed for %s", video_url)
@@ -70,7 +72,7 @@ def process_video(video_url):
             ret, frame = cap.read()
             if not ret: break
             if count % interval == 0:
-                # Add a simple sharpness check (Laplacian)
+                # Sharpness check (Laplacian)
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 sharpness = cv2.Laplacian(gray, cv2.CV_64F).var()
                 if sharpness > 50:
@@ -95,9 +97,8 @@ def process_video(video_url):
             with open(f["path"], "rb") as im_file:
                 b64 = base64.b64encode(im_file.read()).decode('utf-8')
                 payload_imgs.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
-        logger.info("Prepared %s frames for OpenAI request: %s", len(payload_imgs), [f["name"] for f in frame_list[:6]])
+        logger.info("Prepared %s frames for OpenAI request", len(payload_imgs))
 
-        # We force GPT to return a specific structure
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             response_format={"type": "json_object"},
@@ -108,9 +109,7 @@ def process_video(video_url):
         )
         logger.info("OpenAI response received")
         raw_data = json.loads(response.choices[0].message.content)
-        logger.debug("Raw AI response: %s", raw_data)
         
-        # Basic validation of GPT output
         if 'shoes' not in raw_data or not isinstance(raw_data['shoes'], list):
             logger.error("Invalid AI response format: %s", raw_data)
             raise Exception("Invalid AI response format.")
@@ -119,68 +118,58 @@ def process_video(video_url):
         processed_items = []
         logger.info("Processing %s detected shoes", len(raw_data['shoes']))
         for i, shoe in enumerate(raw_data['shoes']):
-            # Validate shoe object keys
             if not all(k in shoe for k in ('frame_name', 'coords')):
                 logger.warning("Skipping shoe entry missing required keys: %s", shoe)
                 continue
             
             target = next((f for f in frame_list if f["name"] == shoe['frame_name']), None)
             if target is None:
-                logger.warning("Frame name not found: %s. Using first available frame.", shoe['frame_name'])
+                logger.warning("Frame name not found: %s. Using first available.", shoe['frame_name'])
                 target = frame_list[0]
 
             img = cv2.imread(target["path"])
             if img is None:
-                logger.error("Failed to load image for frame %s at %s", target["name"], target["path"])
+                logger.error("Failed to load image for frame %s", target["name"])
                 continue
 
             h, w, _ = img.shape
-
-            # ROBUST COORDINATE SCALING
             coords = shoe['coords']
             if not isinstance(coords, list) or len(coords) != 4:
-                logger.warning("Skipping shoe with invalid coords: %s", coords)
                 continue
             
+            # Normalize and scale coords
             y1 = max(0, min(h, int(coords[0] * h / 1000)))
             x1 = max(0, min(w, int(coords[1] * w / 1000)))
             y2 = max(0, min(h, int(coords[2] * h / 1000)))
             x2 = max(0, min(w, int(coords[3] * w / 1000)))
 
             if y2 <= y1 or x2 <= x1:
-                logger.warning("Skipping invalid crop bounds for shoe %s: %s", shoe['frame_name'], coords)
                 continue 
 
-            crop_name = f"crop_{run_id}_{i}.jpg"
-            cv2.imwrite(crop_name, img[y1:y2, x1:x2])
-            logger.info("Created crop %s for shoe %s", crop_name, shoe['frame_name'])
+            # Save crop to /tmp/
+            crop_path = f"/tmp/crop_{run_id}_{i}.jpg"
+            cv2.imwrite(crop_path, img[y1:y2, x1:x2])
+            logger.info("Created crop %s", crop_path)
 
             # STORAGE UPLOAD
             storage_path = f"ingests/{run_id}/shoe_{i}.jpg"
             try:
-                with open(crop_name, 'rb') as f:
-                    supabase.storage.from_("shoe-crops").upload(storage_path, f, {"content-type": "image/jpeg"})
+                with open(crop_path, 'rb') as f_upload:
+                    supabase.storage.from_("shoe-crops").upload(storage_path, f_upload, {"content-type": "image/jpeg"})
                 logger.info("Uploaded crop to Supabase path=%s", storage_path)
             except Exception as e:
-                logger.error("Supabase upload failed for %s: %s", storage_path, e)
+                logger.error("Supabase upload failed: %s", e)
                 continue
             
-            # SUPABASE URL FIX: Handle the object return
+            # SUPABASE URL RESOLUTION
             res = supabase.storage.from_("shoe-crops").get_public_url(storage_path)
-            pub_url = None
-            if hasattr(res, 'public_url'):
-                pub_url = res.public_url
-            elif isinstance(res, dict):
-                pub_url = res.get('publicUrl') or res.get('public_url')
-            else:
-                pub_url = res
+            pub_url = res.public_url if hasattr(res, 'public_url') else (res.get('publicUrl') if isinstance(res, dict) else res)
 
             if not pub_url:
-                logger.error("Could not resolve public URL from Supabase response: %s", res)
+                logger.error("Could not resolve public URL from response: %s", res)
                 continue
-            logger.info("Resolved public URL for storage path %s", storage_path)
 
-            # DINO PING (with Status Check)
+            # DINO PING
             dino_payload = {
                 "video_id": f"vid_{run_id}",
                 "product_id": f"prod_{run_id}_{i}",
@@ -191,7 +180,7 @@ def process_video(video_url):
             try:
                 r = requests.post(f"{conf['DINO_ENDPOINT']}/index-video-frame", json=dino_payload, timeout=45)
                 r.raise_for_status()
-                logger.info("DINO indexing succeeded for product_id=%s", dino_payload['product_id'])
+                logger.info("DINO indexing succeeded")
                 processed_items.append(dino_payload)
             except Exception as e:
                 logger.error("Failed to index item %s: %s", i, e)
@@ -199,27 +188,25 @@ def process_video(video_url):
         return processed_items
 
     finally:
-        logger.info("Cleaning up temporary files for run_id=%s", run_id)
+        logger.info("Cleaning up /tmp/ files for run_id=%s", run_id)
         if os.path.exists(video_path): os.remove(video_path)
         if os.path.exists(frames_dir): shutil.rmtree(frames_dir)
-        for f in os.listdir('.'):
+        # Cleanup crops specifically for this run
+        for f in os.listdir('/tmp/'):
             if f.startswith(f"crop_{run_id}"): 
-                try: os.remove(f)
-                except Exception as e:
-                    logger.warning("Failed to remove crop file %s: %s", f, e)
+                try: os.remove(os.path.join('/tmp/', f))
+                except: pass
 
 @app.route('/ingest', methods=['POST'])
 def ingest():
     data = request.get_json()
     if not data or 'url' not in data:
-        logger.warning("Received ingest request with missing URL payload: %s", data)
         return jsonify({"error": "No URL provided"}), 400
     
     url = data['url']
     logger.info("Received ingest request for URL: %s", url)
     try:
         results = process_video(url)
-        logger.info("Ingest completed for URL: %s, items=%s", url, len(results))
         return jsonify({"status": "success", "count": len(results), "data": results})
     except Exception as e:
         logger.exception("Error processing video URL %s", url)

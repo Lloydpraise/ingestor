@@ -1,6 +1,6 @@
 name: shoe-ingestor
 runtime: python3.10
 install: pip install --no-cache-dir -r requirements.txt
-start: gunicorn --workers 1 --bind 0.0.0.0:8080 --timeout 600 ingestor:app
+start: gunicorn --worker-tmp-dir /tmp --workers 1 --bind 0.0.0.0:8080 --timeout 600 ingestor:app
 env:
   PORT: 8080
