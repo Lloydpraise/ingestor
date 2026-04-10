@@ -34,7 +34,7 @@ def safe_int(val, default=0):
     try: return int(val)
     except: return default
 
-@app.route('/kaithhealth') # Change from kaithheathcheck to kaithhealth
+@app.route('/health') # Changed to standard health check endpoint
 def health_check():
     return "OK", 200
 print("--- DEBUG: HEALTH CHECK ROUTE REGISTERED ---")
